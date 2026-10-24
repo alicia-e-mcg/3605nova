@@ -21,7 +21,7 @@ export default function LoginPage() {
       .eq('id', data.user.id)
       .single()
 
-    if (profile?.role === 'manager') router.push('/dashboard')
+    if (profile?.role === 'manager') router.push('/home')
     else router.push('/roster')
   }
 
