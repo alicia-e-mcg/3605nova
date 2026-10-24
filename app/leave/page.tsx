@@ -58,8 +58,13 @@ export default function LeavePage() {
     if (error || !data) { alert(error?.message ?? 'Something went wrong'); return }
 
     const res = await callApi('/api/leave/process', { leaveId: data.id, action: 'sick' })
-    if (!res.ok) alert(res.error ?? 'Your sick call was saved, but cover could not be arranged automatically.')
-    else alert(`Thanks, get well soon. Your manager has been told and your shifts on ${fmtDate(day)} are being covered.`)
+    if (!res.ok) {
+      alert(res.error ?? 'Your sick call was saved, but cover could not be arranged automatically.')
+    } else if (res.status === 'approved') {
+      alert(`Thanks, get well soon. Cover has been found for ${fmtDate(day)}, so your sick call is approved.`)
+    } else {
+      alert(`Thanks, get well soon. Cover couldn't be found for all your shifts on ${fmtDate(day)}, so your practice manager will review your sick call. It will show as pending until then.`)
+    }
     load()
   }
 

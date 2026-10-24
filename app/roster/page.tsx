@@ -56,7 +56,7 @@ export default function MyRoster() {
       .then(({ data }) => setTeam((data ?? []) as TeamShift[]))
   }, [me, date])
 
-    if (!me) return null
+    if (!me || !date) return null
 
   const today = toYMD(new Date())
   const upcoming = myShifts.filter(s => s.date >= today).slice(0, 5)

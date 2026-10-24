@@ -23,11 +23,12 @@ function weekRange(ymd: string) {
   return [toYMD(monday), toYMD(sunday)]
 }
 
-// Send a message to every manager (shows in their dashboard alerts and, later, the chat room)
-async function alertManagers(body: string) {
-  const { data: managers } = await supabaseAdmin.from('profiles').select('id').eq('role', 'manager')
+// Send an alert to every manager, optionally linked to the shift it's about
+export async function alertManagers(body: string, shiftId?: number) {  const { data: managers } = await supabaseAdmin.from('profiles').select('id').eq('role', 'manager')
   if (managers?.length) {
-    await supabaseAdmin.from('messages').insert(managers.map(m => ({ recipient_id: m.id, body, from_ai: true })))
+    await supabaseAdmin.from('messages').insert(
+      managers.map(m => ({ recipient_id: m.id, body, from_ai: true, shift_id: shiftId ?? null }))
+    )
   }
 }
 
@@ -152,7 +153,14 @@ export async function coverShiftsForLeave(leave: Leave) {
   const reason = leave.type === 'sick' ? 'called in sick' : `is on ${leave.type} leave`
 
   if (!shifts?.length) {
-    await alertManagers(`${absent.full_name} ${reason} (${fmtDate(leave.start_date)}). They have no shifts in that period, so no roster changes were needed.`)
+    // Only announce "no shifts" if this request hasn't already had shifts moved earlier
+    const { count } = await supabaseAdmin
+      .from('shifts')
+      .select('id', { count: 'exact', head: true })
+      .eq('covered_for_leave_id', leave.id)
+    if (!count) {
+      await alertManagers(`${absent.full_name} ${reason} (${fmtDate(leave.start_date)}). They have no shifts in that period, so no roster changes were needed.`)
+    }
     return []
   }
 
@@ -171,7 +179,8 @@ export async function coverShiftsForLeave(leave: Leave) {
         ? `There are no other staff with the job title "${absent.job_title}" (check the spelling in profiles)`
         : excluded.map(e => `${e.name} is ${e.reason}`).join('; ')
       await alertManagers(
-        `Couldn't find cover: ${absent.full_name} ${reason} for ${when}. ${why}. Please arrange cover manually. The shift is marked red on the roster.`
+        `Couldn't find cover: ${absent.full_name} ${reason} for ${when}. ${why}. Please arrange cover manually. The shift is marked red on the roster.`,
+        shift.id
       )
       results.push({ shiftId: shift.id, covered: false })
       continue
@@ -185,7 +194,8 @@ export async function coverShiftsForLeave(leave: Leave) {
       .eq('id', shift.id)
 
     await alertManagers(
-      `${absent.full_name} ${reason}. I've moved their shift on ${when} to ${chosen.full_name}. ${choice.reason} Right-click the shift on the roster if you want to change it.`
+      `${absent.full_name} ${reason}. I've moved their shift on ${when} to ${chosen.full_name}. ${choice.reason}`,
+      shift.id
     )
     results.push({ shiftId: shift.id, covered: true, coveredBy: chosen.full_name })
   }
@@ -193,15 +203,18 @@ export async function coverShiftsForLeave(leave: Leave) {
   return results
 }
 
-// Undo cover when someone withdraws a sick call or approved leave.
+// Undo cover when a request is withdrawn by staff or declined by the manager.
 // Future shifts go back to the original person; past shifts are left alone.
-export async function undoCoverForLeave(leave: Leave) {
+export async function undoCoverForLeave(leave: Leave & { status?: string }, how: 'withdrawn' | 'declined') {
   const today = sydneyToday()
 
   const [{ data: absent }, { data: shifts }] = await Promise.all([
     supabaseAdmin.from('profiles').select('full_name').eq('id', leave.staff_id).single(),
     supabaseAdmin.from('shifts').select('*').eq('covered_for_leave_id', leave.id).gte('date', today).order('date'),
   ])
+
+  // A pending request that never touched any shifts: nothing to undo, nothing to announce
+  if (!shifts?.length && leave.status === 'pending') return
 
   // Work out who had been covering, so the manager can let them know
   const coverIds = [...new Set(
@@ -231,9 +244,12 @@ export async function undoCoverForLeave(leave: Leave) {
   }
 
   const what = leave.type === 'sick' ? 'sick call' : `${leave.type} leave`
+  const opening = how === 'declined'
+    ? `You declined ${absent?.full_name}'s ${what}.`
+    : `${absent?.full_name} withdrew their ${what}.`
   await alertManagers(
     lines.length
-      ? `${absent?.full_name} withdrew their ${what}. These shifts are back with them: ${lines.join('; ')}. Let any cover staff know they're no longer needed.`
-      : `${absent?.full_name} withdrew their ${what}. No upcoming shifts needed changing.`
+      ? `${opening} These shifts are back with them: ${lines.join('; ')}. Let any cover staff know they're no longer needed.`
+      : `${opening} No upcoming shifts needed changing.`
   )
 }

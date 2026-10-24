@@ -6,6 +6,7 @@ import { supabase } from '@/lib/supabase'
 import { useManager } from '@/lib/useManager'
 import AppWindow from '@/components/AppWindow'
 import RequestsPanel from '@/components/RequestsPanel'
+import AlertsBell from '@/components/AlertsBell'
 
 type Profile = { id: string; full_name: string; job_title: string | null }
 type Shift = {
@@ -163,6 +164,14 @@ export default function Dashboard() {
     loadDay()
   }
 
+
+  // Accept an AI-suggested shift from the right-click menu
+  async function confirmShift(id: number) {
+    await supabase.from('shifts').update({ ai_generated: false }).eq('id', id)
+    await supabase.from('messages').update({ dismissed: true }).eq('shift_id', id)
+    loadDay()
+  }
+
   function goToday() {
     const today = new Date()
     setDate(today)
@@ -175,7 +184,7 @@ export default function Dashboard() {
   const isToday = toYMD(date) === toYMD(new Date())
 
   return (
-    <AppWindow>
+    <AppWindow right={<AlertsBell onChange={loadDay} onGoToDate={d => { setDate(d); setMonth(d) }} />}>
       <div className="flex gap-4 p-4">
 
         {/* ---------- Left column ---------- */}
@@ -330,6 +339,12 @@ export default function Dashboard() {
                   setMenu(null)
                 }}
               >Edit shift times</button>
+              {menu.shift.ai_generated && (
+                <button
+                  className="block w-full px-3 py-1.5 text-left font-medium text-purple-700 hover:bg-purple-50"
+                  onClick={() => { confirmShift(menu.shift!.id); setMenu(null) }}
+                >Confirm AI suggestion</button>
+              )}
               {menu.shift.status === 'needs_cover' ? (
                 <button
                   className="block w-full px-3 py-1.5 text-left hover:bg-gray-100"

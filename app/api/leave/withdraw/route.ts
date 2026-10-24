@@ -38,8 +38,7 @@ export async function POST(req: Request) {
     }
 
     // Give shifts back before deleting the request
-    if (leave.status === 'approved') await undoCoverForLeave(leave)
-
+    if (leave.status !== 'declined') await undoCoverForLeave(leave, 'withdrawn')
     const { error: deleteError } = await supabaseAdmin.from('leave_requests').delete().eq('id', leaveId)
     if (deleteError) {
       return NextResponse.json({ error: `Couldn't delete the request: ${deleteError.message}` }, { status: 500 })

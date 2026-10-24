@@ -20,9 +20,14 @@ export const MODULE_ICONS: ToolbarItem[] = [
   { href: '/payroll', label: 'Payroll', icon: Wallet },
 ]
 
-type Props = { title?: string; icons?: ToolbarItem[]; children: ReactNode }
+type Props = {
+  title?: string
+  icons?: ToolbarItem[]
+  right?: ReactNode    // extra buttons on the right of the toolbar (e.g. the alerts bell)
+  children: ReactNode
+}
 
-export default function AppWindow({ title = 'Bp Premier — Staffing & Payroll', icons = MODULE_ICONS, children }: Props) {
+export default function AppWindow({ title = 'Bp Premier — Staffing & Payroll', icons = MODULE_ICONS, right, children }: Props) {
   const pathname = usePathname()
   const router = useRouter()
 
@@ -53,14 +58,17 @@ export default function AppWindow({ title = 'Bp Premier — Staffing & Payroll',
             )
           })}
 
-          <button
-            onClick={async () => { await supabase.auth.signOut(); router.push('/login') }}
-            title="Log out"
-            aria-label="Log out"
-            className="ml-auto flex h-10 w-10 items-center justify-center rounded-full border border-gray-400 bg-white text-gray-700 hover:bg-gray-100"
-          >
-            <LogOut size={18} />
-          </button>
+          <div className="ml-auto flex items-center gap-3">
+            {right}
+            <button
+              onClick={async () => { await supabase.auth.signOut(); router.push('/login') }}
+              title="Log out"
+              aria-label="Log out"
+              className="flex h-10 w-10 items-center justify-center rounded-full border border-gray-400 bg-white text-gray-700 hover:bg-gray-100"
+            >
+              <LogOut size={18} />
+            </button>
+          </div>
         </div>
 
         <div className="flex-1 overflow-auto">{children}</div>
