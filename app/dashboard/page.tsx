@@ -5,6 +5,7 @@ import 'react-day-picker/style.css'
 import { supabase } from '@/lib/supabase'
 import { useManager } from '@/lib/useManager'
 import AppWindow from '@/components/AppWindow'
+import RequestsPanel from '@/components/RequestsPanel'
 
 type Profile = { id: string; full_name: string; job_title: string | null }
 type Shift = {
@@ -45,16 +46,34 @@ function shiftColour(s: Shift) {
 
 export default function Dashboard() {
   const ready = useManager()
-  const [date, setDate] = useState(new Date())
-  const [month, setMonth] = useState(new Date())
+  const [date, setDate] = useState<Date | null>(null)
+  const [month, setMonth] = useState<Date | undefined>(undefined)
+
+  // Set today's date in the browser (not during the server pre-build)
+  useEffect(() => {
+    const now = new Date()
+    setDate(now)
+    setMonth(now)
+  }, [])
   const [staff, setStaff] = useState<Profile[]>([])
   const [shifts, setShifts] = useState<Shift[]>([])
   const [unavailable, setUnavailable] = useState<Set<string>>(new Set())
   const [hidden, setHidden] = useState<Set<string>>(new Set())
-  const [rosteredOnly, setRosteredOnly] = useState(true)   // "auto view": only people rostered that day
   const [availableOnly, setAvailableOnly] = useState(false) // "tick box to show only available ppl"
   const [menu, setMenu] = useState<Menu | null>(null)
   const [editing, setEditing] = useState<Editing | null>(null)
+
+
+  // Remember which staff are ticked, even after refreshing or changing days
+  useEffect(() => {
+    try {
+      const saved = localStorage.getItem('roster-hidden-staff')
+      if (saved) setHidden(new Set(JSON.parse(saved)))
+    } catch {}
+  }, [])
+  useEffect(() => {
+    try { localStorage.setItem('roster-hidden-staff', JSON.stringify([...hidden])) } catch {}
+  }, [hidden])
 
   // Load the staff list once
   useEffect(() => {
@@ -65,6 +84,7 @@ export default function Dashboard() {
 
   // Load shifts, unavailability and approved leave for the selected day
   const loadDay = useCallback(async () => {
+    if (!date) return
     const day = toYMD(date)
     const [{ data: s }, { data: u }, { data: l }] = await Promise.all([
       supabase.from('shifts').select('*').eq('date', day),
@@ -86,10 +106,8 @@ export default function Dashboard() {
   }, [])
 
   // Which staff get a column
-  const rosteredIds = new Set(shifts.map(s => s.staff_id))
   const columns = staff.filter(p =>
     !hidden.has(p.id) &&
-    (!rosteredOnly || rosteredIds.has(p.id)) &&
     (!availableOnly || !unavailable.has(p.id))
   )
 
@@ -123,7 +141,7 @@ export default function Dashboard() {
   }
 
   async function saveShift() {
-    if (!editing) return
+    if (!editing || !date) return
     if (editing.end <= editing.start) { alert('End time must be after start time'); return }
     const row = { staff_id: editing.staffId, date: toYMD(date), start_time: editing.start, end_time: editing.end }
     const { error } = editing.shiftId
@@ -151,8 +169,8 @@ export default function Dashboard() {
     setMonth(today)
   }
 
-  if (!ready) return null
-
+  if (!ready || !date) return null
+  
   const editingName = staff.find(p => p.id === editing?.staffId)?.full_name
   const isToday = toYMD(date) === toYMD(new Date())
 
@@ -184,7 +202,13 @@ export default function Dashboard() {
 
           {/* Staff tick list */}
           <div className="rounded border border-gray-300 p-3">
-            <h2 className="mb-2 text-sm font-semibold">Staff</h2>
+             <div className="mb-2 flex items-center justify-between">
+              <h2 className="text-sm font-semibold">Staff</h2>
+              <div className="flex gap-2 text-xs">
+                <button onClick={() => setHidden(new Set())} className="text-blue-600 hover:underline">All</button>
+                <button onClick={() => setHidden(new Set(staff.map(p => p.id)))} className="text-blue-600 hover:underline">None</button>
+              </div>
+            </div>
             {staff.map(p => (
               <label key={p.id} className="flex items-center gap-2 py-0.5 text-sm">
                 <input type="checkbox" checked={!hidden.has(p.id)} onChange={() => toggleStaff(p.id)} />
@@ -199,10 +223,6 @@ export default function Dashboard() {
           {/* View options */}
           <div className="space-y-1 rounded border border-gray-300 p-3 text-sm">
             <label className="flex items-center gap-2">
-              <input type="checkbox" checked={rosteredOnly} onChange={e => setRosteredOnly(e.target.checked)} />
-              Rostered today only
-            </label>
-            <label className="flex items-center gap-2">
               <input type="checkbox" checked={availableOnly} onChange={e => setAvailableOnly(e.target.checked)} />
               Only available staff
             </label>
@@ -213,7 +233,7 @@ export default function Dashboard() {
             <div className="flex items-center gap-2"><span className="h-3 w-3 bg-slate-300" /> Rostered</div>
             <div className="flex items-center gap-2"><span className="h-3 w-3 bg-purple-200" /> AI suggested</div>
             <div className="flex items-center gap-2"><span className="h-3 w-3 bg-red-200" /> Needs cover</div>
-          </div>
+          </div>  <RequestsPanel onChange={loadDay} />
         </aside>
 
         {/* ---------- Roster grid ---------- */}
@@ -229,11 +249,11 @@ export default function Dashboard() {
             )}
           </div>
 
-          {columns.length === 0 ? (
-            <p className="p-6 text-sm text-gray-500">
-              No staff to show. Untick <span className="font-medium">Rostered today only</span> to see everyone and add shifts.
+          {columns.length === 0 && (
+            <p className="border-b border-gray-300 px-3 py-2 text-sm text-gray-500">
+              No staff selected. Tick people in the Staff list to show their columns.
             </p>
-          ) : (
+          )}
             <table className="w-full table-fixed border-collapse text-sm">
               <thead>
                 <tr className="border-b-2 border-gray-400">
@@ -283,7 +303,6 @@ export default function Dashboard() {
                 ))}
               </tbody>
             </table>
-          )}
           <p className="border-t border-gray-300 px-3 py-1 text-xs text-gray-500">
             Right-click a time slot to add a shift, or right-click a shift to change it.
           </p>
