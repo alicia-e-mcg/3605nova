@@ -125,6 +125,9 @@ export async function generatePayroll(weekStart: string) {
   const { error: itemError } = await supabaseAdmin.from('payroll_items').insert(lines.map(l => ({
     run_id: runId,
     staff_id: l.staff_id,
+    week_start: weekStart,
+    week_end: weekEnd,
+    rates: { saturday: m.sat, sunday: m.sun, holiday: m.hol, overtime: m.ot },
     base_rate: l.base_rate,
     ordinary_hours: l.ordinary_hours,
     saturday_hours: l.saturday_hours,
