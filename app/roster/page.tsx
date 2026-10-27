@@ -6,6 +6,8 @@ import { supabase } from '@/lib/supabase'
 import { useProfile } from '@/lib/useProfile'
 import StaffWindow from '@/components/StaffWindow'
 import { toYMD, fromYMD, fmtTime, fmtDate } from '@/lib/dates'
+import { mergeShifts } from '@/lib/mergeShifts'
+import WeekGrid from '@/components/WeekGrid'
 
 type Shift = {
   id: number; staff_id: string; date: string
@@ -28,6 +30,7 @@ export default function MyRoster() {
 
   // Set today's date in the browser (not during the server pre-build)
   useEffect(() => { setDate(new Date()) }, [])
+  const [view, setView] = useState<'day' | 'week'>('day')
   const [myShifts, setMyShifts] = useState<Shift[]>([])
   const [myUnavailable, setMyUnavailable] = useState<string[]>([])
   const [team, setTeam] = useState<TeamShift[]>([])
@@ -59,7 +62,7 @@ export default function MyRoster() {
     if (!me || !date) return null
 
   const today = toYMD(new Date())
-  const upcoming = myShifts.filter(s => s.date >= today).slice(0, 5)
+  const upcoming = mergeShifts(myShifts.filter(s => s.date >= today)).slice(0, 5)
 
   return (
     <StaffWindow>
@@ -113,12 +116,34 @@ export default function MyRoster() {
         <section className="rounded border border-gray-300">
           <div className="flex items-center justify-between border-b border-gray-300 px-3 py-2">
             <span className="font-semibold">
-              Team roster — {date.toLocaleDateString('en-AU', { weekday: 'long', day: 'numeric', month: 'long' })}
+              {view === 'day'
+                ? `Team roster — ${date.toLocaleDateString('en-AU', { weekday: 'long', day: 'numeric', month: 'long' })}`
+                : 'Team roster — week'}
             </span>
-            <span className="rounded bg-gray-100 px-2 py-0.5 text-xs text-gray-600">View only</span>
+            <div className="flex items-center gap-2">
+              <span className="rounded bg-gray-100 px-2 py-0.5 text-xs text-gray-600">View only</span>
+              <div className="flex overflow-hidden rounded border border-gray-400 text-xs">
+                {(['day', 'week'] as const).map(v => (
+                  <button
+                    key={v}
+                    onClick={() => setView(v)}
+                    className={`px-3 py-1 capitalize ${view === v ? 'bg-blue-600 text-white' : 'hover:bg-gray-100'}`}
+                  >
+                    {v}
+                  </button>
+                ))}
+              </div>
+            </div>
           </div>
 
-          {team.length === 0 ? (
+          {view === 'week' ? (
+            <WeekGrid
+              date={date}
+              highlightId={me.id}
+              onOpenDay={d => { setDate(d); setView('day') }}
+              onChangeDate={setDate}
+            />
+          ) : team.length === 0 ? (
             <p className="p-4 text-sm text-gray-500">Nobody is rostered on this day.</p>
           ) : (
             <table className="w-full text-sm">
@@ -131,7 +156,7 @@ export default function MyRoster() {
                 </tr>
               </thead>
               <tbody>
-                {team.map(s => (
+                {mergeShifts(team).map(s => (
                   <tr key={s.id} className={`border-b border-gray-200 ${s.staff_id === me.id ? 'bg-blue-50 font-medium' : ''}`}>
                     <td className="p-2">{s.profiles?.full_name}{s.staff_id === me.id && ' (you)'}</td>
                     <td className="p-2 text-gray-600">{s.profiles?.job_title}</td>

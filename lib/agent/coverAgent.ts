@@ -9,7 +9,7 @@ import { checkStaffForWindow, hoursBetween, isTime, toMin, MIN_SPLIT_HOURS, WEEK
 const AZURE_ENDPOINT = (process.env.AZURE_OPENAI_ENDPOINT || '').replace(/\/+$/, '')
 const AZURE_DEPLOYMENT = process.env.AZURE_OPENAI_DEPLOYMENT || 'gpt-4-1-mini'
 const AI_URL = `${AZURE_ENDPOINT}/openai/deployments/${AZURE_DEPLOYMENT}/chat/completions?api-version=2024-10-21`
-const AI_MODEL = AZURE_DEPLOYMENT
+export const AI_MODEL = AZURE_DEPLOYMENT
 
 const MAX_STEPS = 8
 const STEP_TIMEOUT_MS = 20000   // give up on a single AI call after 20 seconds
@@ -104,7 +104,7 @@ const TOOLS = [
 // ---------- Helpers ----------
 
 // Calls GitHub Models, retrying up to twice if it's busy (503) or rate-limited (429)
-async function callAI(body: unknown, token: string): Promise<any | null> {
+export async function callAI(body: unknown, token: string): Promise<any | null> {
   for (let attempt = 1; attempt <= 3; attempt++) {
     try {
       const res = await fetch(AI_URL, {
@@ -149,7 +149,7 @@ function normTime(t: unknown): unknown {
   const m = t.trim().match(/^(\d{1,2}):(\d{2})(?::\d{2})?$/)
   return m ? `${m[1].padStart(2, '0')}:${m[2]}` : t
 }
-function normalizeArgs(args: any) {
+export function normalizeArgs(args: any) {
   const a = { ...(args ?? {}) }
   if ('start_time' in a) a.start_time = normTime(a.start_time)
   if ('end_time' in a) a.end_time = normTime(a.end_time)
@@ -170,7 +170,7 @@ export async function runCoverAgent(shift: Shift, absent: Profile, leave: Leave)
     return null
   }
   console.log(`Cover agent starting (azure, ${AI_MODEL})`)
-  
+
   const start = shift.start_time.slice(0, 5)
   const end = shift.end_time.slice(0, 5)
   const state = { done: false, covered: false, summary: '', coveredBy: [] as string[] }

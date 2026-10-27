@@ -7,6 +7,9 @@ import { useManager } from '@/lib/useManager'
 import AppWindow from '@/components/AppWindow'
 import RequestsPanel from '@/components/RequestsPanel'
 import AlertsBell from '@/components/AlertsBell'
+import { mergeShifts, type Merged } from '@/lib/mergeShifts'
+import WeekGrid from '@/components/WeekGrid'
+import AutoRosterPanel from '@/components/AutoRosterPanel'
 
 type Profile = { id: string; full_name: string; job_title: string | null }
 type Shift = {
@@ -14,11 +17,12 @@ type Shift = {
   start_time: string; end_time: string
   status: string; ai_generated: boolean
 }
+type Block = Merged<Shift>
 type Cell =
   | { kind: 'empty'; t: number }
-  | { kind: 'block'; t: number; span: number; shift: Shift }
+  | { kind: 'block'; t: number; span: number; shift: Block }
   | { kind: 'skip' }
-type Menu = { x: number; y: number; staffId: string; t: number; shift?: Shift }
+type Menu = { x: number; y: number; staffId: string; t: number; shift?: Block }
 type Editing = { staffId: string; shiftId?: number; start: string; end: string }
 
 // Grid runs 7am to 7pm in 30-minute slots
@@ -49,6 +53,15 @@ export default function Dashboard() {
   const ready = useManager()
   const [date, setDate] = useState<Date | null>(null)
   const [month, setMonth] = useState<Date | undefined>(undefined)
+  const [staff, setStaff] = useState<Profile[]>([])
+  const [shifts, setShifts] = useState<Shift[]>([])
+  const [unavailable, setUnavailable] = useState<Set<string>>(new Set())
+  const [hidden, setHidden] = useState<Set<string>>(new Set())
+  const [availableOnly, setAvailableOnly] = useState(false)
+  const [menu, setMenu] = useState<Menu | null>(null)
+  const [editing, setEditing] = useState<Editing | null>(null)
+  const [view, setView] = useState<'day' | 'week'>('day')
+  const [weekRefresh, setWeekRefresh] = useState(0)
 
   // Set today's date in the browser (not during the server pre-build)
   useEffect(() => {
@@ -56,14 +69,6 @@ export default function Dashboard() {
     setDate(now)
     setMonth(now)
   }, [])
-  const [staff, setStaff] = useState<Profile[]>([])
-  const [shifts, setShifts] = useState<Shift[]>([])
-  const [unavailable, setUnavailable] = useState<Set<string>>(new Set())
-  const [hidden, setHidden] = useState<Set<string>>(new Set())
-  const [availableOnly, setAvailableOnly] = useState(false) // "tick box to show only available ppl"
-  const [menu, setMenu] = useState<Menu | null>(null)
-  const [editing, setEditing] = useState<Editing | null>(null)
-
 
   // Remember which staff are ticked, even after refreshing or changing days
   useEffect(() => {
@@ -106,20 +111,21 @@ export default function Dashboard() {
     return () => window.removeEventListener('click', close)
   }, [])
 
-  // Which staff get a column
+  // Columns depend only on the tick boxes (and the "only available" filter)
   const columns = staff.filter(p =>
     !hidden.has(p.id) &&
     (!availableOnly || !unavailable.has(p.id))
   )
 
-  // Works out which slots in a column are empty, the start of a shift block, or covered by a block
+  // Works out which slots in a column are empty, the start of a shift block, or covered by a block.
+  // Back-to-back shifts are shown as one combined block.
   function buildCells(staffId: string): Cell[] {
     const cells: Cell[] = SLOTS.map(t => ({ kind: 'empty', t }))
-    shifts.filter(s => s.staff_id === staffId).forEach(shift => {
-      const start = toMin(shift.start_time), end = toMin(shift.end_time)
+    mergeShifts(shifts.filter(s => s.staff_id === staffId)).forEach(block => {
+      const start = toMin(block.start_time), end = toMin(block.end_time)
       const covered = SLOTS.map((t, i) => ({ t, i })).filter(({ t }) => t >= start && t < end)
       if (!covered.length) return
-      cells[covered[0].i] = { kind: 'block', t: covered[0].t, span: covered.length, shift }
+      cells[covered[0].i] = { kind: 'block', t: covered[0].t, span: covered.length, shift: block }
       covered.slice(1).forEach(({ i }) => { cells[i] = { kind: 'skip' } })
     })
     return cells
@@ -135,7 +141,7 @@ export default function Dashboard() {
     })
   }
 
-  function openMenu(e: React.MouseEvent, staffId: string, t: number, shift?: Shift) {
+  function openMenu(e: React.MouseEvent, staffId: string, t: number, shift?: Block) {
     e.preventDefault()
     e.stopPropagation()
     setMenu({ x: e.clientX, y: e.clientY, staffId, t, shift })
@@ -153,24 +159,28 @@ export default function Dashboard() {
     loadDay()
   }
 
-  async function deleteShift(id: number) {
-    if (!confirm('Delete this shift?')) return
-    await supabase.from('shifts').delete().eq('id', id)
+  async function deleteShift(ids: number[]) {
+    const msg = ids.length > 1 ? `Delete this combined shift (all ${ids.length} parts)?` : 'Delete this shift?'
+    if (!confirm(msg)) return
+    await supabase.from('shifts').delete().in('id', ids)
     loadDay()
   }
 
-  async function setStatus(id: number, status: string) {
-    await supabase.from('shifts').update({ status }).eq('id', id)
+  async function setStatus(ids: number[], status: string) {
+    await supabase.from('shifts').update({ status }).in('id', ids)
     loadDay()
   }
 
-
-  // Accept an AI-suggested shift (and every other part of it, if it was split)
+  // Accept an AI-suggested shift (and every other part of it, if the agent split it)
   async function confirmShift(id: number) {
     const { data } = await supabase.from('shifts').select('split_from_shift_id').eq('id', id).single()
     const rootId = data?.split_from_shift_id ?? id
     await supabase.from('shifts').update({ ai_generated: false }).or(`id.eq.${rootId},split_from_shift_id.eq.${rootId}`)
     await supabase.from('messages').update({ dismissed: true }).eq('shift_id', rootId)
+  }
+
+  async function confirmBlock(block: Block) {
+    for (const p of block.parts.filter(p => p.ai_generated)) await confirmShift(p.id)
     loadDay()
   }
 
@@ -181,12 +191,14 @@ export default function Dashboard() {
   }
 
   if (!ready || !date) return null
-  
+
   const editingName = staff.find(p => p.id === editing?.staffId)?.full_name
   const isToday = toYMD(date) === toYMD(new Date())
+  const monday = new Date(date.getFullYear(), date.getMonth(), date.getDate() - ((date.getDay() + 6) % 7))
+  const weekStartYMD = toYMD(monday)
 
   return (
-    <AppWindow right={<AlertsBell onChange={loadDay} onGoToDate={d => { setDate(d); setMonth(d) }} />}>
+    <AppWindow right={<AlertsBell onChange={loadDay} onGoToDate={d => { setDate(d); setMonth(d); setView('day') }} />}>
       <div className="flex gap-4 p-4">
 
         {/* ---------- Left column ---------- */}
@@ -213,7 +225,7 @@ export default function Dashboard() {
 
           {/* Staff tick list */}
           <div className="rounded border border-gray-300 p-3">
-             <div className="mb-2 flex items-center justify-between">
+            <div className="mb-2 flex items-center justify-between">
               <h2 className="text-sm font-semibold">Staff</h2>
               <div className="flex gap-2 text-xs">
                 <button onClick={() => setHidden(new Set())} className="text-blue-600 hover:underline">All</button>
@@ -244,126 +256,170 @@ export default function Dashboard() {
             <div className="flex items-center gap-2"><span className="h-3 w-3 bg-slate-300" /> Rostered</div>
             <div className="flex items-center gap-2"><span className="h-3 w-3 bg-purple-200" /> AI suggested</div>
             <div className="flex items-center gap-2"><span className="h-3 w-3 bg-red-200" /> Needs cover</div>
-          </div>  <RequestsPanel onChange={loadDay} />
+          </div>
+
+          <RequestsPanel onChange={loadDay} />
         </aside>
 
         {/* ---------- Roster grid ---------- */}
         <section className="flex-1 overflow-x-auto rounded border border-gray-300">
           <div className="flex items-center justify-between border-b border-gray-300 px-3 py-2">
             <span className="font-semibold">
-              {date.toLocaleDateString('en-AU', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' })}
+              {view === 'day'
+                ? date.toLocaleDateString('en-AU', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' })
+                : 'Week view'}
             </span>
-            {!isToday && (
-              <button onClick={goToday} className="rounded border border-gray-400 px-2 py-0.5 text-xs hover:bg-gray-100">
-                Today
-              </button>
-            )}
+            <div className="flex items-center gap-2">
+              {view === 'week' && (
+                <AutoRosterPanel weekStart={weekStartYMD} onDone={() => { setWeekRefresh(k => k + 1); loadDay() }} />
+              )}
+              {!isToday && (
+                <button onClick={goToday} className="rounded border border-gray-400 px-2 py-0.5 text-xs hover:bg-gray-100">
+                  Today
+                </button>
+              )}
+              <div className="flex overflow-hidden rounded border border-gray-400 text-xs">
+                {(['day', 'week'] as const).map(v => (
+                  <button
+                    key={v}
+                    onClick={() => setView(v)}
+                    className={`px-3 py-1 capitalize ${view === v ? 'bg-blue-600 text-white' : 'hover:bg-gray-100'}`}
+                  >
+                    {v}
+                  </button>
+                ))}
+              </div>
+            </div>
           </div>
 
+          {view === 'week' ? (
+            <WeekGrid
+              date={date}
+              staff={columns}
+              refreshKey={weekRefresh}
+              onOpenDay={d => { setDate(d); setMonth(d); setView('day') }}
+              onChangeDate={d => { setDate(d); setMonth(d) }}
+            />
+          ) : (<>
           {columns.length === 0 && (
             <p className="border-b border-gray-300 px-3 py-2 text-sm text-gray-500">
               No staff selected. Tick people in the Staff list to show their columns.
             </p>
           )}
-            <table className="w-full table-fixed border-collapse text-sm">
-              <thead>
-                <tr className="border-b-2 border-gray-400">
-                  <th className="w-20 border-r border-gray-300 p-2 text-left font-medium">Time</th>
-                  {columns.map(p => (
-                    <th key={p.id} className="border-r border-gray-300 p-2 text-left font-medium">
-                      <div>{p.full_name}</div>
-                      <div className="text-xs font-normal text-gray-500">{p.job_title}</div>
-                      {unavailable.has(p.id) && <div className="text-xs font-normal text-red-600">Unavailable</div>}
-                    </th>
-                  ))}
-                </tr>
-              </thead>
-              <tbody>
-                {SLOTS.map((t, row) => (
-                  <tr key={t} className={t % 60 === 0 ? 'border-t border-gray-300' : ''}>
-                    <td className="h-7 border-r border-gray-300 px-2 align-top text-xs text-gray-500">
-                      {t % 60 === 0 ? fmt(t) : ''}
-                    </td>
-                    {columns.map(p => {
-                      const cell = cellsByStaff[p.id][row]
-                      if (cell.kind === 'skip') return null
-                      if (cell.kind === 'block') {
-                        const s = cell.shift
-                        return (
-                          <td
-                            key={p.id}
-                            rowSpan={cell.span}
-                            onContextMenu={e => openMenu(e, p.id, cell.t, s)}
-                            className={`cursor-context-menu border-r border-gray-300 px-2 py-1 align-top text-xs ${shiftColour(s)}`}
-                          >
-                            <div className="font-medium">{fmt(toMin(s.start_time))} – {fmt(toMin(s.end_time))}</div>
-                            {s.ai_generated && <div>AI suggested</div>}
-                            {s.status === 'needs_cover' && <div className="font-semibold text-red-700">Needs cover</div>}
-                          </td>
-                        )
-                      }
+
+          <table className="w-full table-fixed border-collapse text-sm">
+            <thead>
+              <tr className="border-b-2 border-gray-400">
+                <th className="w-20 border-r border-gray-300 p-2 text-left font-medium">Time</th>
+                {columns.map(p => (
+                  <th key={p.id} className="border-r border-gray-300 p-2 text-left font-medium">
+                    <div>{p.full_name}</div>
+                    <div className="text-xs font-normal text-gray-500">{p.job_title}</div>
+                    {unavailable.has(p.id) && <div className="text-xs font-normal text-red-600">Unavailable</div>}
+                  </th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {SLOTS.map((t, row) => (
+                <tr key={t} className={t % 60 === 0 ? 'border-t border-gray-300' : ''}>
+                  <td className="h-7 border-r border-gray-300 px-2 align-top text-xs text-gray-500">
+                    {t % 60 === 0 ? fmt(t) : ''}
+                  </td>
+                  {columns.map(p => {
+                    const cell = cellsByStaff[p.id][row]
+                    if (cell.kind === 'skip') return null
+                    if (cell.kind === 'block') {
+                      const s = cell.shift
                       return (
                         <td
                           key={p.id}
-                          onContextMenu={e => openMenu(e, p.id, cell.t)}
-                          className="cursor-context-menu border-r border-gray-300 hover:bg-blue-50"
-                        />
+                          rowSpan={cell.span}
+                          onContextMenu={e => openMenu(e, p.id, cell.t, s)}
+                          className={`cursor-context-menu border-r border-gray-300 px-2 py-1 align-top text-xs ${shiftColour(s)}`}
+                        >
+                          <div className="font-medium">{fmt(toMin(s.start_time))} – {fmt(toMin(s.end_time))}</div>
+                          {s.parts.length > 1 && <div className="opacity-75">Combined shift</div>}
+                          {s.ai_generated && <div>AI suggested</div>}
+                          {s.status === 'needs_cover' && <div className="font-semibold text-red-700">Needs cover</div>}
+                        </td>
                       )
-                    })}
-                  </tr>
-                ))}
-              </tbody>
-            </table>
+                    }
+                    return (
+                      <td
+                        key={p.id}
+                        onContextMenu={e => openMenu(e, p.id, cell.t)}
+                        className="cursor-context-menu border-r border-gray-300 hover:bg-blue-50"
+                      />
+                    )
+                  })}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+
           <p className="border-t border-gray-300 px-3 py-1 text-xs text-gray-500">
             Right-click a time slot to add a shift, or right-click a shift to change it.
           </p>
+          </>)}
         </section>
       </div>
 
       {/* ---------- Right-click menu ---------- */}
       {menu && (
         <div
-          className="fixed z-50 w-48 rounded border border-gray-300 bg-white py-1 text-sm shadow-lg"
+          className="fixed z-50 w-52 rounded border border-gray-300 bg-white py-1 text-sm shadow-lg"
           style={{ top: menu.y, left: menu.x }}
           onClick={e => e.stopPropagation()}
         >
-          {menu.shift ? (
-            <>
-              <button
-                className="block w-full px-3 py-1.5 text-left hover:bg-gray-100"
-                onClick={() => {
-                  setEditing({
-                    staffId: menu.staffId,
-                    shiftId: menu.shift!.id,
-                    start: menu.shift!.start_time.slice(0, 5),
-                    end: menu.shift!.end_time.slice(0, 5),
-                  })
-                  setMenu(null)
-                }}
-              >Edit shift times</button>
-              {menu.shift.ai_generated && (
+          {menu.shift ? (() => {
+            const block = menu.shift
+            const ids = block.parts.map(p => p.id)
+            return (
+              <>
+                {block.parts.length === 1 ? (
+                  <button
+                    className="block w-full px-3 py-1.5 text-left hover:bg-gray-100"
+                    onClick={() => {
+                      const single = block.parts[0]
+                      setEditing({
+                        staffId: menu.staffId,
+                        shiftId: single.id,
+                        start: single.start_time.slice(0, 5),
+                        end: single.end_time.slice(0, 5),
+                      })
+                      setMenu(null)
+                    }}
+                  >Edit shift times</button>
+                ) : (
+                  <div className="px-3 py-1.5 text-xs text-gray-500">
+                    Combined from {block.parts.length} shifts
+                  </div>
+                )}
+                {block.ai_generated && (
+                  <button
+                    className="block w-full px-3 py-1.5 text-left font-medium text-purple-700 hover:bg-purple-50"
+                    onClick={() => { confirmBlock(block); setMenu(null) }}
+                  >Confirm AI suggestion</button>
+                )}
+                {block.status === 'needs_cover' ? (
+                  <button
+                    className="block w-full px-3 py-1.5 text-left hover:bg-gray-100"
+                    onClick={() => { setStatus(ids, 'covered'); setMenu(null) }}
+                  >Mark as covered</button>
+                ) : (
+                  <button
+                    className="block w-full px-3 py-1.5 text-left hover:bg-gray-100"
+                    onClick={() => { setStatus(ids, 'needs_cover'); setMenu(null) }}
+                  >Mark as needs cover</button>
+                )}
                 <button
-                  className="block w-full px-3 py-1.5 text-left font-medium text-purple-700 hover:bg-purple-50"
-                  onClick={() => { confirmShift(menu.shift!.id); setMenu(null) }}
-                >Confirm AI suggestion</button>
-              )}
-              {menu.shift.status === 'needs_cover' ? (
-                <button
-                  className="block w-full px-3 py-1.5 text-left hover:bg-gray-100"
-                  onClick={() => { setStatus(menu.shift!.id, 'covered'); setMenu(null) }}
-                >Mark as covered</button>
-              ) : (
-                <button
-                  className="block w-full px-3 py-1.5 text-left hover:bg-gray-100"
-                  onClick={() => { setStatus(menu.shift!.id, 'needs_cover'); setMenu(null) }}
-                >Mark as needs cover</button>
-              )}
-              <button
-                className="block w-full px-3 py-1.5 text-left text-red-600 hover:bg-red-50"
-                onClick={() => { deleteShift(menu.shift!.id); setMenu(null) }}
-              >Delete shift</button>
-            </>
-          ) : (
+                  className="block w-full px-3 py-1.5 text-left text-red-600 hover:bg-red-50"
+                  onClick={() => { deleteShift(ids); setMenu(null) }}
+                >Delete shift</button>
+              </>
+            )
+          })() : (
             <button
               className="block w-full px-3 py-1.5 text-left hover:bg-gray-100"
               onClick={() => {
