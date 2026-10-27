@@ -2,7 +2,7 @@
 import type { ReactNode } from 'react'
 import Link from 'next/link'
 import { usePathname, useRouter } from 'next/navigation'
-import { House, CalendarDays, MessageSquare, Wallet, LogOut, type LucideIcon } from 'lucide-react'
+import { House, CalendarDays, MessageSquare, Wallet, SlidersHorizontal, LogOut, type LucideIcon } from 'lucide-react'
 import { supabase } from '@/lib/supabase'
 
 export type ToolbarItem = {
@@ -18,6 +18,7 @@ export const MODULE_ICONS: ToolbarItem[] = [
   { href: '/dashboard', label: 'Roster', icon: CalendarDays },
   { href: '/chat', label: 'Chat room', icon: MessageSquare },
   { href: '/payroll', label: 'Payroll', icon: Wallet },
+  { href: '/settings', label: 'Staffing needs', icon: SlidersHorizontal },
 ]
 
 type Props = {

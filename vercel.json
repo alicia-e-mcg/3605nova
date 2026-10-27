@@ -1,0 +1,5 @@
+{
+  "crons": [
+    { "path": "/api/payroll/generate", "schedule": "30 14 * * 0" }
+  ]
+}
