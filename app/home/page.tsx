@@ -20,7 +20,7 @@ export default function Home() {
   return (
     <AppWindow title="Bp Premier" icons={BP_ICONS}>
       <div className="flex min-h-[70vh] flex-col items-center justify-center gap-4">
-        <img src="/bp-logo.jpg" alt="Best Practice" className="h-24" />
+        <img src="/bp-logo.png" alt="Best Practice" className="h-24" />
         <p className="text-sm text-gray-500">
           Open <span className="font-medium">Staffing &amp; Payroll</span> from the highlighted icon above.
         </p>

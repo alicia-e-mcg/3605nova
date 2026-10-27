@@ -28,7 +28,7 @@ export default function LoginPage() {
   return (
     <main className="min-h-screen flex items-center justify-center bg-gray-100">
       <form onSubmit={handleLogin} className="bg-white p-8 rounded-lg shadow w-80 space-y-4">
-        <img src="/bp-logo.jpg" alt="Best Practice" className="mx-auto h-16" />
+        <img src="/bp-logo.png" alt="Best Practice" className="mx-auto h-16" />
         <h1 className="text-center text-lg font-semibold text-gray-800">Staffing & Payroll</h1>
         <input
           className="w-full border rounded p-2 text-gray-900"

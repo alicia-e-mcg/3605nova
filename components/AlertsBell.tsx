@@ -1,3 +1,4 @@
+/* eslint-disable @typescript-eslint/no-explicit-any */
 'use client'
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { Bell, X } from 'lucide-react'
@@ -11,15 +12,41 @@ type AiAlert = {
   shift_id: number | null
   shifts: { id: number; date: string; status: string; ai_generated: boolean } | null
 }
+type AgentStep = { id: number; step: number; tool: string; args: any; result: any }
 
 type Props = {
   onChange: () => void            // reload the roster after confirming a shift
   onGoToDate: (d: Date) => void   // jump the calendar to a day
 }
 
+// Turns a logged tool call into a plain-English line
+function describeStep(s: AgentStep) {
+  const a = s.args ?? {}
+  const r = s.result ?? {}
+  switch (s.tool) {
+    case 'get_day_roster':
+      return `Looked at the day's roster (${r.shifts?.length ?? 0} shifts)`
+    case 'find_available_staff': {
+      const staff: any[] = r.staff ?? []
+      const ok = staff.filter(x => x.eligible).map(x => x.name)
+      return `Checked who can work ${a.start_time}–${a.end_time}: ${ok.length ? ok.join(', ') : 'nobody eligible'}`
+    }
+    case 'assign_shift':
+      return r.error ? `Tried to assign the shift. Refused: ${r.error}` : 'Assigned the whole shift'
+    case 'split_shift':
+      return r.error ? `Tried to split the shift. Refused: ${r.error}` : `Split the shift into ${a.parts?.length ?? 2} parts`
+    case 'escalate_to_manager':
+      return 'Escalated to the manager'
+    default:
+      return s.tool
+  }
+}
+
 export default function AlertsBell({ onChange, onGoToDate }: Props) {
   const [alerts, setAlerts] = useState<AiAlert[]>([])
   const [open, setOpen] = useState(false)
+  const [stepsFor, setStepsFor] = useState<number | null>(null)
+  const [steps, setSteps] = useState<AgentStep[]>([])
   const boxRef = useRef<HTMLDivElement>(null)
 
   const load = useCallback(async () => {
@@ -64,10 +91,13 @@ export default function AlertsBell({ onChange, onGoToDate }: Props) {
     if (ids.length) await supabase.from('messages').update({ dismissed: true }).in('id', ids)
   }
 
-  // Accept the AI's choice: the shift becomes a normal shift and the alert closes
+  // Accept the AI's choice (including every part of a split) and close the alert
   async function confirmShift(a: AiAlert) {
     if (!a.shift_id) return
-    const { error } = await supabase.from('shifts').update({ ai_generated: false }).eq('id', a.shift_id)
+    const { error } = await supabase
+      .from('shifts')
+      .update({ ai_generated: false })
+      .or(`id.eq.${a.shift_id},split_from_shift_id.eq.${a.shift_id}`)
     if (error) { alert(error.message); return }
     await dismiss(a.id)
     onChange()
@@ -77,6 +107,20 @@ export default function AlertsBell({ onChange, onGoToDate }: Props) {
     if (!a.shifts) return
     onGoToDate(fromYMD(a.shifts.date))
     setOpen(false)
+  }
+
+  async function toggleSteps(a: AiAlert) {
+    if (stepsFor === a.id) { setStepsFor(null); return }
+    setStepsFor(a.id)
+    setSteps([])
+    if (!a.shift_id) return
+    const { data } = await supabase
+      .from('agent_logs')
+      .select('id, step, tool, args, result')
+      .eq('shift_id', a.shift_id)
+      .order('created_at')
+      .order('step')
+    setSteps((data ?? []) as AgentStep[])
   }
 
   return (
@@ -105,7 +149,7 @@ export default function AlertsBell({ onChange, onGoToDate }: Props) {
           </div>
 
           {alerts.length === 0 ? (
-            <p className="p-4 text-sm text-gray-500">You're all caught up.</p>
+            <p className="p-4 text-sm text-gray-500">You&apos;re all caught up.</p>
           ) : (
             <ul className="max-h-[70vh] overflow-y-auto">
               {alerts.map(a => {
@@ -147,7 +191,21 @@ export default function AlertsBell({ onChange, onGoToDate }: Props) {
                         >
                           View {fmtDate(s.date)} on roster
                         </button>
+                        <button
+                          onClick={() => toggleSteps(a)}
+                          className="rounded border border-gray-300 px-2 py-1 text-xs hover:bg-gray-100"
+                        >
+                          {stepsFor === a.id ? 'Hide agent steps' : 'Show agent steps'}
+                        </button>
                       </div>
+                    )}
+
+                    {stepsFor === a.id && (
+                      <ol className="mt-2 list-decimal space-y-1 rounded bg-white/70 py-2 pl-6 pr-2 text-xs text-gray-700">
+                        {steps.length === 0
+                          ? <li className="list-none text-gray-500">No agent steps (the rules backup handled this one).</li>
+                          : steps.map(st => <li key={st.id}>{describeStep(st)}</li>)}
+                      </ol>
                     )}
                   </li>
                 )

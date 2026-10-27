@@ -165,10 +165,12 @@ export default function Dashboard() {
   }
 
 
-  // Accept an AI-suggested shift from the right-click menu
+  // Accept an AI-suggested shift (and every other part of it, if it was split)
   async function confirmShift(id: number) {
-    await supabase.from('shifts').update({ ai_generated: false }).eq('id', id)
-    await supabase.from('messages').update({ dismissed: true }).eq('shift_id', id)
+    const { data } = await supabase.from('shifts').select('split_from_shift_id').eq('id', id).single()
+    const rootId = data?.split_from_shift_id ?? id
+    await supabase.from('shifts').update({ ai_generated: false }).or(`id.eq.${rootId},split_from_shift_id.eq.${rootId}`)
+    await supabase.from('messages').update({ dismissed: true }).eq('shift_id', rootId)
     loadDay()
   }
 
