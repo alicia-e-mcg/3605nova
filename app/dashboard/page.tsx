@@ -17,14 +17,17 @@ type Shift = {
   id: number; staff_id: string; date: string
   start_time: string; end_time: string
   status: string; ai_generated: boolean
+  covered_for_leave_id?: number | null
+  split_from_shift_id?: number | null
 }
+
 type Block = Merged<Shift>
 type Cell =
   | { kind: 'empty'; t: number }
   | { kind: 'block'; t: number; span: number; shift: Block }
   | { kind: 'skip' }
 type Menu = { x: number; y: number; staffId: string; t: number; shift?: Block }
-type Editing = { staffId: string; shiftId?: number; start: string; end: string }
+type Editing = { staffId: string; partIds?: number[]; start: string; end: string }
 
 // Grid runs 7am to 7pm in 30-minute slots
 const DAY_START = 7 * 60
@@ -154,54 +157,84 @@ export default function Dashboard() {
     setMenu({ x: e.clientX, y: e.clientY, staffId, t, shift })
   }
 
+  // A normal shift the manager made (not linked to a sick call or an agent split)
+  const isPlain = (s: Shift) =>
+    !s.ai_generated && !s.covered_for_leave_id && !s.split_from_shift_id && s.status !== 'needs_cover'
+
   async function saveShift() {
     if (!editing || !date) return
     if (editing.end <= editing.start) { alert('End time must be after start time'); return }
     const day = toYMD(date)
     const name = staff.find(p => p.id === editing.staffId)?.full_name ?? 'They'
+    const editIds = editing.partIds ?? []
 
-    // This person's other shifts that day (not the one being edited)
-    const others = shifts
-      .filter(s => s.staff_id === editing.staffId && s.date === day && s.id !== editing.shiftId)
-      .map(s => ({ start: toMin(s.start_time), end: toMin(s.end_time) }))
+    // This person's other shifts that day (not the ones being edited)
+    const othersList = shifts.filter(s =>
+      s.staff_id === editing.staffId && s.date === day && !editIds.includes(s.id)
+    )
 
     // Keep only the parts of the new time they aren't already working
     let pieces = [{ start: toMin(editing.start), end: toMin(editing.end) }]
-    for (const o of others) {
+    for (const o of othersList) {
+      const os = toMin(o.start_time), oe = toMin(o.end_time)
       pieces = pieces.flatMap(p => {
-        if (o.end <= p.start || o.start >= p.end) return [p]   // no overlap
+        if (oe <= p.start || os >= p.end) return [p]
         const out: { start: number; end: number }[] = []
-        if (o.start > p.start) out.push({ start: p.start, end: o.start })
-        if (o.end < p.end) out.push({ start: o.end, end: p.end })
+        if (os > p.start) out.push({ start: p.start, end: os })
+        if (oe < p.end) out.push({ start: oe, end: p.end })
         return out
       })
     }
     pieces = pieces.filter(p => p.end > p.start)
+    if (pieces.length === 0) { alert(`${name} is already working that whole time.`); return }
 
-    if (pieces.length === 0) {
-      alert(`${name} is already working that whole time.`)
+    // ---------- Editing an existing shift as a whole ----------
+    if (editIds.length) {
+      const parts = shifts.filter(s => editIds.includes(s.id))
+      if (parts.some(p => !isPlain(p)) &&
+          !confirm('Part of this shift is cover the agent arranged for a sick call. Editing it as a whole makes it a normal shift, so it won\'t be handed back automatically if the sick call is withdrawn. Continue?')) {
+        return
+      }
+      const [keepId, ...removeIds] = editIds
+      const [first, ...rest] = pieces
+      const { error } = await supabase.from('shifts').update({
+        start_time: toHHMM(first.start), end_time: toHHMM(first.end),
+        status: 'scheduled', ai_generated: false,
+        covered_for_leave_id: null, original_staff_id: null, split_from_shift_id: null,
+        original_start_time: null, original_end_time: null,
+      }).eq('id', keepId)
+      if (error) { alert(error.message); return }
+      if (removeIds.length) await supabase.from('shifts').delete().in('id', removeIds)
+      if (rest.length) {
+        await supabase.from('shifts').insert(rest.map(p => ({
+          staff_id: editing.staffId, date: day, start_time: toHHMM(p.start), end_time: toHHMM(p.end),
+        })))
+      }
+      setEditing(null)
+      loadDay()
       return
     }
 
-    const rows = pieces.map(p => ({
-      staff_id: editing.staffId,
-      date: day,
-      start_time: toHHMM(p.start),
-      end_time: toHHMM(p.end),
-    }))
+    // ---------- Adding: extend a touching normal shift instead of making a new one ----------
+    const plainOthers = othersList.filter(isPlain)
+    for (const p of pieces) {
+      const left = plainOthers.find(o => toMin(o.end_time) === p.start)
+      const right = plainOthers.find(o => toMin(o.start_time) === p.end)
 
-    if (editing.shiftId) {
-      // Editing: the shift becomes the first piece; any other pieces are added as new shifts
-      const [first, ...rest] = rows
-      const { error } = await supabase.from('shifts').update(first).eq('id', editing.shiftId)
-      if (error) { alert(error.message); return }
-      if (rest.length) {
-        const { error: insertError } = await supabase.from('shifts').insert(rest)
-        if (insertError) { alert(insertError.message); return }
+      if (left && right) {
+        // Fills a gap between two shifts: join all three into one
+        await supabase.from('shifts').update({ end_time: right.end_time }).eq('id', left.id)
+        await supabase.from('shifts').delete().eq('id', right.id)
+      } else if (left) {
+        await supabase.from('shifts').update({ end_time: toHHMM(p.end) }).eq('id', left.id)
+      } else if (right) {
+        await supabase.from('shifts').update({ start_time: toHHMM(p.start) }).eq('id', right.id)
+      } else {
+        const { error } = await supabase.from('shifts').insert({
+          staff_id: editing.staffId, date: day, start_time: toHHMM(p.start), end_time: toHHMM(p.end),
+        })
+        if (error) { alert(error.message); return }
       }
-    } else {
-      const { error } = await supabase.from('shifts').insert(rows)
-      if (error) { alert(error.message); return }
     }
 
     setEditing(null)
@@ -397,7 +430,7 @@ export default function Dashboard() {
                           onContextMenu={e => openMenu(e, p.id, cell.t, s)}
                           className={`relative cursor-context-menu border-r border-gray-300 px-2 py-1 align-top text-xs ${shiftColour(s)}`}
                         >
-                          {/* Amber stripes over just the overstaffed part (clicks pass straight through) */}
+                          {/* Amber stripes over just the overstaffed stretch, labelled at its start (clicks pass through) */}
                           {overPeriods.map((q, i) => (
                             <div
                               key={i}
@@ -406,16 +439,14 @@ export default function Dashboard() {
                                 top: `${((q.start - blockStart) / (blockEnd - blockStart)) * 100}%`,
                                 height: `${((q.end - q.start) / (blockEnd - blockStart)) * 100}%`,
                               }}
-                            />
+                            >
+                              <span className="absolute right-1 top-0.5 rounded bg-amber-100 px-1 text-[10px] font-semibold text-amber-800">
+                                Overstaffed {fmt(q.start)}–{fmt(q.end)}
+                              </span>
+                            </div>
                           ))}
                           <div className="relative">
                             <div className="font-medium">{fmt(blockStart)} – {fmt(blockEnd)}</div>
-                            {s.parts.length > 1 && <div className="opacity-75">Combined shift</div>}
-                            {overPeriods.length > 0 && (
-                              <div className="font-semibold text-amber-800">
-                                Overstaffed {overPeriods.map(q => `${fmt(q.start)}–${fmt(q.end)}`).join(', ')}
-                              </div>
-                            )}
                             {s.ai_generated && <div>AI suggested</div>}
                             {s.status === 'needs_cover' && <div className="font-semibold text-red-700">Needs cover</div>}
                           </div>
@@ -454,42 +485,18 @@ export default function Dashboard() {
             const ids = block.parts.map(p => p.id)
             return (
               <>
-                {block.parts.length === 1 ? (
-                  <button
-                    className="block w-full px-3 py-1.5 text-left hover:bg-gray-100"
-                    onClick={() => {
-                      const single = block.parts[0]
-                      setEditing({
-                        staffId: menu.staffId,
-                        shiftId: single.id,
-                        start: single.start_time.slice(0, 5),
-                        end: single.end_time.slice(0, 5),
-                      })
-                      setMenu(null)
-                    }}
-                  >Edit shift times</button>
-                ) : (
-                  <>
-                    <div className="px-3 pt-1.5 text-xs text-gray-500">Combined from {block.parts.length} shifts</div>
-                    {block.parts.map(part => (
-                      <button
-                        key={part.id}
-                        className="block w-full px-3 py-1.5 text-left hover:bg-gray-100"
-                        onClick={() => {
-                          setEditing({
-                            staffId: menu.staffId,
-                            shiftId: part.id,
-                            start: part.start_time.slice(0, 5),
-                            end: part.end_time.slice(0, 5),
-                          })
-                          setMenu(null)
-                        }}
-                      >
-                        Edit {fmt(toMin(part.start_time))}–{fmt(toMin(part.end_time))} part
-                      </button>
-                    ))}
-                  </>
-                )}
+                <button
+                  className="block w-full px-3 py-1.5 text-left hover:bg-gray-100"
+                  onClick={() => {
+                    setEditing({
+                      staffId: menu.staffId,
+                      partIds: ids,
+                      start: block.start_time.slice(0, 5),
+                      end: block.end_time.slice(0, 5),
+                    })
+                    setMenu(null)
+                  }}
+                >Edit shift times</button>
                 {block.ai_generated && (
                   <button
                     className="block w-full px-3 py-1.5 text-left font-medium text-purple-700 hover:bg-purple-50"
@@ -533,7 +540,7 @@ export default function Dashboard() {
       {editing && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30">
           <div className="w-80 space-y-3 rounded-md bg-white p-5 shadow-xl">
-            <h3 className="font-semibold">{editing.shiftId ? 'Edit shift' : 'Add shift'}</h3>
+            <h3 className="font-semibold">{editing.partIds?.length ? 'Edit shift' : 'Add shift'}</h3>
             <p className="text-sm text-gray-600">
               {editingName} · {date.toLocaleDateString('en-AU')}
             </p>
