@@ -10,6 +10,7 @@ import AlertsBell from '@/components/AlertsBell'
 import { mergeShifts, type Merged } from '@/lib/mergeShifts'
 import WeekGrid from '@/components/WeekGrid'
 import AutoRosterPanel from '@/components/AutoRosterPanel'
+import { findOverstaffedPeriods, mergePeriods, OVERSTAFFED_CLASS, STRIPES_CLASS, type Rule } from '@/lib/staffing'
 
 type Profile = { id: string; full_name: string; job_title: string | null }
 type Shift = {
@@ -62,6 +63,7 @@ export default function Dashboard() {
   const [editing, setEditing] = useState<Editing | null>(null)
   const [view, setView] = useState<'day' | 'week'>('day')
   const [weekRefresh, setWeekRefresh] = useState(0)
+  const [rules, setRules] = useState<Rule[]>([])
 
   // Set today's date in the browser (not during the server pre-build)
   useEffect(() => {
@@ -81,11 +83,13 @@ export default function Dashboard() {
     try { localStorage.setItem('roster-hidden-staff', JSON.stringify([...hidden])) } catch {}
   }, [hidden])
 
-  // Load the staff list once
+  // Load the staff list and staffing needs once
   useEffect(() => {
     if (!ready) return
     supabase.from('profiles').select('id, full_name, job_title').eq('role', 'staff').order('full_name')
       .then(({ data }) => setStaff(data ?? []))
+    supabase.from('coverage_rules').select('day_of_week, job_title, min_staff, start_time, end_time')
+      .then(({ data }) => setRules((data ?? []) as Rule[]))
   }, [ready])
 
   // Load shifts, unavailability and approved leave for the selected day
@@ -116,6 +120,9 @@ export default function Dashboard() {
     !hidden.has(p.id) &&
     (!availableOnly || !unavailable.has(p.id))
   )
+
+  // Shifts on a stretch with more people than the staffing needs ask for
+  const overstaffed = findOverstaffedPeriods(shifts, new Map(staff.map(p => [p.id, p.job_title])), rules)
 
   // Works out which slots in a column are empty, the start of a shift block, or covered by a block.
   // Back-to-back shifts are shown as one combined block.
@@ -150,11 +157,53 @@ export default function Dashboard() {
   async function saveShift() {
     if (!editing || !date) return
     if (editing.end <= editing.start) { alert('End time must be after start time'); return }
-    const row = { staff_id: editing.staffId, date: toYMD(date), start_time: editing.start, end_time: editing.end }
-    const { error } = editing.shiftId
-      ? await supabase.from('shifts').update(row).eq('id', editing.shiftId)
-      : await supabase.from('shifts').insert(row)
-    if (error) { alert(error.message); return }
+    const day = toYMD(date)
+    const name = staff.find(p => p.id === editing.staffId)?.full_name ?? 'They'
+
+    // This person's other shifts that day (not the one being edited)
+    const others = shifts
+      .filter(s => s.staff_id === editing.staffId && s.date === day && s.id !== editing.shiftId)
+      .map(s => ({ start: toMin(s.start_time), end: toMin(s.end_time) }))
+
+    // Keep only the parts of the new time they aren't already working
+    let pieces = [{ start: toMin(editing.start), end: toMin(editing.end) }]
+    for (const o of others) {
+      pieces = pieces.flatMap(p => {
+        if (o.end <= p.start || o.start >= p.end) return [p]   // no overlap
+        const out: { start: number; end: number }[] = []
+        if (o.start > p.start) out.push({ start: p.start, end: o.start })
+        if (o.end < p.end) out.push({ start: o.end, end: p.end })
+        return out
+      })
+    }
+    pieces = pieces.filter(p => p.end > p.start)
+
+    if (pieces.length === 0) {
+      alert(`${name} is already working that whole time.`)
+      return
+    }
+
+    const rows = pieces.map(p => ({
+      staff_id: editing.staffId,
+      date: day,
+      start_time: toHHMM(p.start),
+      end_time: toHHMM(p.end),
+    }))
+
+    if (editing.shiftId) {
+      // Editing: the shift becomes the first piece; any other pieces are added as new shifts
+      const [first, ...rest] = rows
+      const { error } = await supabase.from('shifts').update(first).eq('id', editing.shiftId)
+      if (error) { alert(error.message); return }
+      if (rest.length) {
+        const { error: insertError } = await supabase.from('shifts').insert(rest)
+        if (insertError) { alert(insertError.message); return }
+      }
+    } else {
+      const { error } = await supabase.from('shifts').insert(rows)
+      if (error) { alert(error.message); return }
+    }
+
     setEditing(null)
     loadDay()
   }
@@ -256,6 +305,7 @@ export default function Dashboard() {
             <div className="flex items-center gap-2"><span className="h-3 w-3 bg-slate-300" /> Rostered</div>
             <div className="flex items-center gap-2"><span className="h-3 w-3 bg-purple-200" /> AI suggested</div>
             <div className="flex items-center gap-2"><span className="h-3 w-3 bg-red-200" /> Needs cover</div>
+            <div className="flex items-center gap-2"><span className={`h-3 w-3 bg-slate-300 ${OVERSTAFFED_CLASS}`} /> Overstaffed</div>
           </div>
 
           <RequestsPanel onChange={loadDay} />
@@ -297,6 +347,7 @@ export default function Dashboard() {
               date={date}
               staff={columns}
               refreshKey={weekRefresh}
+              showStaffing
               onOpenDay={d => { setDate(d); setMonth(d); setView('day') }}
               onChangeDate={d => { setDate(d); setMonth(d) }}
             />
@@ -331,17 +382,43 @@ export default function Dashboard() {
                     if (cell.kind === 'skip') return null
                     if (cell.kind === 'block') {
                       const s = cell.shift
+                      const blockStart = toMin(s.start_time)
+                      const blockEnd = toMin(s.end_time)
+                      // Only the overstaffed stretches of this block
+                      const overPeriods = s.status === 'needs_cover' ? [] : mergePeriods(
+                        s.parts.flatMap(part => overstaffed.get(part.id) ?? [])
+                      )
+                        .map(q => ({ start: Math.max(q.start, blockStart), end: Math.min(q.end, blockEnd) }))
+                        .filter(q => q.end > q.start)
                       return (
                         <td
                           key={p.id}
                           rowSpan={cell.span}
                           onContextMenu={e => openMenu(e, p.id, cell.t, s)}
-                          className={`cursor-context-menu border-r border-gray-300 px-2 py-1 align-top text-xs ${shiftColour(s)}`}
+                          className={`relative cursor-context-menu border-r border-gray-300 px-2 py-1 align-top text-xs ${shiftColour(s)}`}
                         >
-                          <div className="font-medium">{fmt(toMin(s.start_time))} – {fmt(toMin(s.end_time))}</div>
-                          {s.parts.length > 1 && <div className="opacity-75">Combined shift</div>}
-                          {s.ai_generated && <div>AI suggested</div>}
-                          {s.status === 'needs_cover' && <div className="font-semibold text-red-700">Needs cover</div>}
+                          {/* Amber stripes over just the overstaffed part (clicks pass straight through) */}
+                          {overPeriods.map((q, i) => (
+                            <div
+                              key={i}
+                              className={`pointer-events-none absolute inset-x-0 border-y-2 border-amber-400 ${STRIPES_CLASS}`}
+                              style={{
+                                top: `${((q.start - blockStart) / (blockEnd - blockStart)) * 100}%`,
+                                height: `${((q.end - q.start) / (blockEnd - blockStart)) * 100}%`,
+                              }}
+                            />
+                          ))}
+                          <div className="relative">
+                            <div className="font-medium">{fmt(blockStart)} – {fmt(blockEnd)}</div>
+                            {s.parts.length > 1 && <div className="opacity-75">Combined shift</div>}
+                            {overPeriods.length > 0 && (
+                              <div className="font-semibold text-amber-800">
+                                Overstaffed {overPeriods.map(q => `${fmt(q.start)}–${fmt(q.end)}`).join(', ')}
+                              </div>
+                            )}
+                            {s.ai_generated && <div>AI suggested</div>}
+                            {s.status === 'needs_cover' && <div className="font-semibold text-red-700">Needs cover</div>}
+                          </div>
                         </td>
                       )
                     }
@@ -392,9 +469,26 @@ export default function Dashboard() {
                     }}
                   >Edit shift times</button>
                 ) : (
-                  <div className="px-3 py-1.5 text-xs text-gray-500">
-                    Combined from {block.parts.length} shifts
-                  </div>
+                  <>
+                    <div className="px-3 pt-1.5 text-xs text-gray-500">Combined from {block.parts.length} shifts</div>
+                    {block.parts.map(part => (
+                      <button
+                        key={part.id}
+                        className="block w-full px-3 py-1.5 text-left hover:bg-gray-100"
+                        onClick={() => {
+                          setEditing({
+                            staffId: menu.staffId,
+                            shiftId: part.id,
+                            start: part.start_time.slice(0, 5),
+                            end: part.end_time.slice(0, 5),
+                          })
+                          setMenu(null)
+                        }}
+                      >
+                        Edit {fmt(toMin(part.start_time))}–{fmt(toMin(part.end_time))} part
+                      </button>
+                    ))}
+                  </>
                 )}
                 {block.ai_generated && (
                   <button

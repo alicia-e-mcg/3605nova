@@ -17,11 +17,12 @@ export function mergeShifts<T extends BaseShift>(list: T[]): Merged<T>[] {
   const out: Merged<T>[] = []
   for (const s of sorted) {
     const last = out[out.length - 1]
+    // Joins shifts that touch or overlap (same person, same day)
     const joinsOn =
       last &&
       last.staff_id === s.staff_id &&
       last.date === s.date &&
-      last.end_time.slice(0, 5) === s.start_time.slice(0, 5)
+      last.end_time.slice(0, 5) >= s.start_time.slice(0, 5)
 
     if (joinsOn) {
       last.parts.push(s)
@@ -30,7 +31,7 @@ export function mergeShifts<T extends BaseShift>(list: T[]): Merged<T>[] {
         : last.status === 'covered' || s.status === 'covered' ? 'covered'
         : last.status
       Object.assign(last, {
-        end_time: s.end_time,
+        end_time: s.end_time.slice(0, 5) > last.end_time.slice(0, 5) ? s.end_time : last.end_time,
         status,
         ai_generated: !!(last.ai_generated || s.ai_generated),
       })

@@ -4,6 +4,7 @@ import { ChevronLeft, ChevronRight } from 'lucide-react'
 import { supabase } from '@/lib/supabase'
 import { toYMD, fmtTime } from '@/lib/dates'
 import { mergeShifts } from '@/lib/mergeShifts'
+import { findOverstaffedPeriods, mergePeriods, fmtMin, type Rule, type Period } from '@/lib/staffing'
 
 type Profile = { id: string; full_name: string; job_title: string | null }
 type Shift = {
@@ -19,6 +20,7 @@ type Props = {
   onOpenDay: (d: Date) => void     // clicking a day opens the day view
   onChangeDate: (d: Date) => void  // previous / next week
   refreshKey?: number              // change this to reload the week
+  showStaffing?: boolean           // manager only: flag overstaffed shifts
 }
 
 const toMin = (t: string) => { const [h, m] = t.split(':').map(Number); return h * 60 + m }
@@ -41,7 +43,7 @@ function shiftColour(s: Shift) {
   return 'bg-slate-300 border-l-4 border-slate-500'
 }
 
-export default function WeekGrid({ date, staff, highlightId, onOpenDay, onChangeDate, refreshKey }: Props) {
+export default function WeekGrid({ date, staff, highlightId, onOpenDay, onChangeDate, refreshKey, showStaffing }: Props) {
   const weekStart = mondayOf(date)
   const days = Array.from({ length: 7 }, (_, i) => addDays(weekStart, i))
   const startYMD = toYMD(days[0])
@@ -50,6 +52,17 @@ export default function WeekGrid({ date, staff, highlightId, onOpenDay, onChange
   const [allStaff, setAllStaff] = useState<Profile[]>([])
   const [shifts, setShifts] = useState<Shift[]>([])
   const [off, setOff] = useState<Set<string>>(new Set()) // "staffId|YYYY-MM-DD" when unavailable or on leave
+  const [rules, setRules] = useState<Rule[]>([])
+  const [roles, setRoles] = useState<Map<string, string | null>>(new Map())
+
+  // Staffing needs and everyone's role (for the overstaffed check)
+  useEffect(() => {
+    if (!showStaffing) return
+    supabase.from('coverage_rules').select('day_of_week, job_title, min_staff, start_time, end_time')
+      .then(({ data }) => setRules((data ?? []) as Rule[]))
+    supabase.from('profiles').select('id, job_title').eq('role', 'staff')
+      .then(({ data }) => setRoles(new Map((data ?? []).map(p => [p.id, p.job_title]))))
+  }, [showStaffing, refreshKey])
 
   // Load everyone if no staff list was passed in
   useEffect(() => {
@@ -83,6 +96,9 @@ export default function WeekGrid({ date, staff, highlightId, onOpenDay, onChange
 
   const people = staff ?? allStaff
   const merged = mergeShifts(shifts)
+  const overstaffed = showStaffing ? findOverstaffedPeriods(shifts, roles, rules) : new Map<number, Period[]>()
+  const overOf = (s: { status: string; parts: { id: number }[] }) =>
+    s.status === 'needs_cover' ? [] : mergePeriods(s.parts.flatMap(p => overstaffed.get(p.id) ?? []))
   const todayYMD = toYMD(new Date())
 
   return (
@@ -149,8 +165,16 @@ export default function WeekGrid({ date, staff, highlightId, onOpenDay, onChange
                       className="cursor-pointer border-r border-gray-300 p-1 align-top hover:bg-gray-50"
                     >
                       {dayShifts.map(s => (
-                        <div key={s.id} className={`mb-1 rounded px-1.5 py-1 ${shiftColour(s)}`}>
+                        <div
+                          key={s.id}
+                          className={`mb-1 rounded px-1.5 py-1 ${shiftColour(s)} ${overOf(s).length ? 'outline-2 outline-dashed outline-amber-500' : ''}`}
+                        >
                           {fmtTime(s.start_time)}–{fmtTime(s.end_time)}
+                          {overOf(s).length > 0 && (
+                            <div className="font-semibold text-amber-800">
+                              Over {overOf(s).map(q => `${fmtMin(q.start)}–${fmtMin(q.end)}`).join(', ')}
+                            </div>
+                          )}
                           {s.status === 'needs_cover' && <div className="font-semibold text-red-700">Needs cover</div>}
                           {s.ai_generated && s.status !== 'needs_cover' && <div>AI suggested</div>}
                         </div>
